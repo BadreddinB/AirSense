@@ -1,0 +1,30 @@
+# API
+fastapi==0.136.3
+uvicorn==0.54.0
+pydantic==2.13.5
+
+# Data processing and storage
+numpy==2.2.6
+pandas==2.3.3
+pyarrow==25.0.1
+
+# Machine learning
+joblib==1.6.0
+scikit-learn==1.7.2
+xgboost==3.2.0
+
+# Ingestion and data validation
+requests==2.34.2
+great-expectations==1.23.2
+
+# Model training and experiment tracking
+mlflow==3.16.1
+
+# Continuous monitoring
+evidently==0.7.23
+prometheus-client==0.26.0
+
+# Testing and code quality
+pytest==9.1.1
+pytest-cov==7.1.0
+ruff==0.16.10

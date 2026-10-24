@@ -1,0 +1,112 @@
+
+name: AirSense Docker CI/CD
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    name: Test and build Docker images
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Check dependencies
+        run: python -m pip check
+
+      - name: Run tests
+        run: python -m pytest -q
+
+      - name: Build API image
+        run: docker build -f Dockerfile.api -t airsense-api:ci .
+
+      - name: Smoke-test API
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          docker run -d --rm \
+            --name airsense-api-ci \
+            -p 127.0.0.1:8000:8000 \
+            airsense-api:ci
+
+          cleanup() {
+            docker stop airsense-api-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:8000/health; then
+              echo
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "API health check failed."
+          docker logs airsense-api-ci
+          exit 1
+
+      - name: Build Airflow image
+        run: docker build -f airflow/Dockerfile -t airsense-airflow:ci .
+
+      - name: Check Airflow dependencies
+        run: docker run --rm airsense-airflow:ci python -m pip check
+
+  publish:
+    name: Publish images to GHCR
+    needs: test-and-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish API image
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}-api"
+          docker build -f Dockerfile.api -t "$IMAGE:latest" .
+          docker push "$IMAGE:latest"
+          docker tag "$IMAGE:latest" "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:$GITHUB_SHA"
+
+      - name: Build and publish Airflow image
+        shell: bash
+        run: |
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}-airflow"
+          docker build -f airflow/Dockerfile -t "$IMAGE:latest" .
+          docker push "$IMAGE:latest"
+          docker tag "$IMAGE:latest" "$IMAGE:$GITHUB_SHA"
+          docker push "$IMAGE:$GITHUB_SHA"
