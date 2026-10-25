@@ -1,11 +1,9 @@
-"""
-Unit tests for the Silver transformation pipeline.
-
-Verifies schema adherence, column completeness, data types,
-and temporal integrity when converting Bronze JSON into Silver DataFrames.
-"""
+"""Unit tests for the Silver transformation pipeline."""
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -14,57 +12,99 @@ from scripts.transformation.transform_silver import (
     EXPECTED_POLLUTANTS,
     EXPECTED_WEATHER_FEATURES,
     process_city_year,
+    save_silver_parquet,
 )
 
 
-def test_process_city_year_schema() -> None:
-    """Verify that process_city_year produces a clean DataFrame with all expected features."""
-    city = "Paris"
+@pytest.fixture
+def bronze_dir(tmp_path: Path) -> Path:
+    """Create valid synthetic hourly Bronze data for one city and year."""
+    city = "paris"
     year = 2021
+    hours = 8760
+    timestamps = pd.date_range(
+        f"{year}-01-01 00:00:00",
+        periods=hours,
+        freq="h",
+    ).strftime("%Y-%m-%dT%H:%M:%S").tolist()
 
-    df = process_city_year(city=city, year=year)
-
-    # 1. Structure assertions
-    assert isinstance(df, pd.DataFrame), "Output must be a pandas DataFrame"
-    assert len(df) == 8760, f"Expected 8760 rows for leap year {year}, got {len(df)}"
-
-    # 2. Metadata columns assertions
-    assert "city" in df.columns, "Metadata column 'city' missing"
-    assert "timestamp" in df.columns, "Timestamp column missing"
-    assert (df["city"] == city).all(), "City values do not match input argument"
-
-    # 3. Features and targets presence assertions
+    air_quality = {"time": timestamps}
     for pollutant in EXPECTED_POLLUTANTS:
-        assert pollutant in df.columns, f"Target pollutant column '{pollutant}' missing"
-        assert pd.api.types.is_float_dtype(df[pollutant]), f"Column '{pollutant}' must be float"
+        air_quality[pollutant] = [1.0] * hours
 
-    for weather_features in EXPECTED_WEATHER_FEATURES:
-        assert weather_features in df.columns, f"Weather column '{weather_features}' missing"
-        assert pd.api.types.is_float_dtype(df[weather_features]), f"Column '{weather_features}' must be float"
+    weather_values = {
+        "temperature_2m": 15.0,
+        "relative_humidity_2m": 60.0,
+        "wind_speed_10m": 3.0,
+        "wind_direction_10m": 180.0,
+        "precipitation": 0.0,
+        "dew_point_2m": 8.0,
+        "surface_pressure": 1013.0,
+        "cloud_cover": 20.0,
+        "shortwave_radiation": 0.0,
+        "boundary_layer_height": 500.0,
+    }
+    weather = {"time": timestamps}
+    for feature in EXPECTED_WEATHER_FEATURES:
+        weather[feature] = [weather_values[feature]] * hours
 
-    # 4. Temporal consistency assertions
-    assert pd.api.types.is_datetime64_any_dtype(df["timestamp"]), "Timestamp must be datetime type"
-    assert df["timestamp"].is_monotonic_increasing, "Timestamps must be sorted in ascending order"
-    assert not df["timestamp"].duplicated().any(), "Duplicate timestamps detected"
+    air_path = tmp_path / "air_quality" / city / f"air_quality_{year}.json"
+    weather_path = tmp_path / "open_meteo" / city / f"weather_{year}.json"
+    air_path.parent.mkdir(parents=True)
+    weather_path.parent.mkdir(parents=True)
 
-
-def test_save_silver_parquet_round_trip(tmp_path) -> None:
-    """Verify that Silver data survives a Parquet write/read round trip."""
-    from scripts.transformation.transform_silver import (
-        process_city_year,
-        save_silver_parquet,
+    air_path.write_text(
+        json.dumps({"hourly": air_quality}), encoding="utf-8"
+    )
+    weather_path.write_text(
+        json.dumps({"hourly": weather}), encoding="utf-8"
     )
 
+    return tmp_path
+
+
+def test_process_city_year_schema(bronze_dir: Path) -> None:
+    """Verify the Silver schema, types, and hourly timestamp integrity."""
     city = "Paris"
     year = 2021
 
-    original_df = process_city_year(city=city, year=year)
+    df = process_city_year(
+        city=city,
+        year=year,
+        base_bronze_dir=bronze_dir,
+    )
+
+    assert isinstance(df, pd.DataFrame)
+    assert len(df) == 8760
+    assert "city" in df.columns
+    assert "timestamp" in df.columns
+    assert (df["city"] == city).all()
+
+    for column in EXPECTED_POLLUTANTS + EXPECTED_WEATHER_FEATURES:
+        assert column in df.columns
+        assert pd.api.types.is_float_dtype(df[column])
+
+    assert pd.api.types.is_datetime64_any_dtype(df["timestamp"])
+    assert df["timestamp"].is_monotonic_increasing
+    assert not df["timestamp"].duplicated().any()
+
+
+def test_save_silver_parquet_round_trip(
+    bronze_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """Verify Silver Parquet output can be read back without data loss."""
+    original_df = process_city_year(
+        city="Paris",
+        year=2021,
+        base_bronze_dir=bronze_dir,
+    )
 
     output_path = save_silver_parquet(
         df=original_df,
-        city=city,
-        year=year,
-        base_silver_dir=tmp_path,
+        city="Paris",
+        year=2021,
+        base_silver_dir=tmp_path / "silver",
     )
 
     restored_df = pd.read_parquet(output_path)
@@ -74,3 +114,4 @@ def test_save_silver_parquet_round_trip(tmp_path) -> None:
     assert list(restored_df.columns) == list(original_df.columns)
     assert restored_df.dtypes.equals(original_df.dtypes)
     pd.testing.assert_frame_equal(restored_df, original_df)
+
