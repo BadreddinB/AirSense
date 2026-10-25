@@ -36,3 +36,6 @@ airflow/.env
 # Local Airflow configuration containing credentials
 airflow/config/airflow.cfg
 
+# Generated monitoring reports
+/reports/
+

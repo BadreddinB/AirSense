@@ -631,27 +631,79 @@ def run_training_workflow(
 
         model = fit_selected_model(development_df, best_model_name)
         final_metrics = evaluate_final_model(model, test_df)
-        artifact_paths = save_model_artifacts(
-            model, best_model_name, final_metrics, output_dir
+
+        # Compare the candidate with the current reference on the same test set.
+        output_path = Path(output_dir)
+        reference_model_path = output_path / "best_model.joblib"
+        promoted = not reference_model_path.exists()
+        reference_metrics = None
+
+        if reference_model_path.exists():
+            import joblib
+
+            reference_model = joblib.load(reference_model_path)
+            reference_metrics = evaluate_final_model(reference_model, test_df)
+            promoted = should_promote_model(final_metrics, reference_metrics)
+
+        mlflow.log_param("model_promoted", promoted)
+        mlflow.log_metric("model_promoted", float(promoted))
+        mlflow.log_param(
+            "promotion_reason",
+            "no_reference_model" if reference_metrics is None
+            else "candidate_improved" if promoted
+            else "candidate_not_better",
         )
 
-        log_metrics_by_target(final_metrics, prefix="test")
-        mlflow.log_artifact(artifact_paths["model_path"], artifact_path="model")
-        mlflow.log_artifact(artifact_paths["metrics_path"], artifact_path="evaluation")
-        mlflow.log_artifact(artifact_paths["metadata_path"], artifact_path="evaluation")
+        log_metrics_by_target(final_metrics, prefix="candidate_test")
+
+        # Keep candidate results in MLflow even when promotion is rejected.
+        mlflow.log_text(
+            final_metrics.to_csv(index=False),
+            "candidate_evaluation/final_test_metrics.csv",
+        )
+
+        artifact_paths = {}
+        if promoted:
+            artifact_paths = save_model_artifacts(
+                model, best_model_name, final_metrics, output_dir
+            )
+            mlflow.log_artifact(
+                artifact_paths["model_path"], artifact_path="model"
+            )
+            mlflow.log_artifact(
+                artifact_paths["metrics_path"], artifact_path="evaluation"
+            )
+            mlflow.log_artifact(
+                artifact_paths["metadata_path"], artifact_path="evaluation"
+            )
+            logging.info(
+                "Candidate model %s promoted and saved.",
+                best_model_name,
+            )
+        else:
+            logging.info(
+                "Candidate model %s was not promoted. "
+                "The reference model remains unchanged.",
+                best_model_name,
+            )
+
         mlflow.log_dict(
             {
                 "model_name": best_model_name,
+                "model_promoted": promoted,
                 "feature_columns": list(FEATURE_COLUMNS),
                 "target_columns": list(TARGET_COLUMNS),
                 "test_metrics": final_metrics.to_dict(orient="records"),
+                "reference_metrics": (
+                    reference_metrics.to_dict(orient="records")
+                    if reference_metrics is not None
+                    else None
+                ),
                 "parent_run_id": parent_run.info.run_id,
             },
             "model_metadata_mlflow.json",
         )
 
-        # Log the fitted estimator in MLflow's sklearn flavor as well as the
-        # portable joblib file produced by save_model_artifacts.
         mlflow.sklearn.log_model(
             sk_model=model,
             name="selected_model",
@@ -664,5 +716,33 @@ def run_training_workflow(
             "cv_results": cv_results,
             "selection_summary": selection_summary,
             "final_metrics": final_metrics,
+            "reference_metrics": reference_metrics,
+            "promoted": promoted,
             "artifacts": artifact_paths,
         }
+
+
+def should_promote_model(
+    candidate: pd.DataFrame,
+    reference: pd.DataFrame,
+) -> bool:
+    """Return whether a candidate model improves mean RMSE over a reference."""
+    for name, metrics in (
+        ("candidate", candidate),
+        ("reference", reference),
+    ):
+        if "rmse" not in metrics.columns:
+            raise ValueError(f"{name} metrics must contain an 'rmse' column")
+
+        rmse_values = pd.to_numeric(metrics["rmse"], errors="coerce")
+
+        if rmse_values.empty or rmse_values.isna().any():
+            raise ValueError(f"{name} RMSE values must be non-empty and numeric")
+
+        if not rmse_values.map(lambda value: value >= 0 and value < float("inf")).all():
+            raise ValueError(f"{name} RMSE values must be finite and non-negative")
+
+    candidate_mean_rmse = candidate["rmse"].mean()
+    reference_mean_rmse = reference["rmse"].mean()
+
+    return bool(candidate_mean_rmse < reference_mean_rmse)

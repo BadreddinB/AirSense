@@ -1,4 +1,3 @@
-
 """Tests for the AirSense model training pipeline."""
 
 import json
@@ -21,6 +20,8 @@ from scripts.training.train_model import (
     select_best_model,
     split_train_test_by_time,
     summarize_model_results,
+    should_promote_model,
+    run_training_workflow,
 )
 
 
@@ -372,3 +373,33 @@ def test_save_model_artifacts_creates_expected_files(
     assert metadata["target_columns"] == list(TARGET_COLUMNS)
     assert len(metadata["evaluation"]) == len(TARGET_COLUMNS)
     assert "created_at_utc" in metadata
+
+
+def test_model_promotion_accepts_lower_rmse() -> None:
+    """A candidate with a lower mean RMSE should be accepted."""
+    from scripts.training.train_model import should_promote_model
+
+    candidate = pd.DataFrame({"rmse": [1.0, 2.0, 3.0]})
+    reference = pd.DataFrame({"rmse": [2.0, 3.0, 4.0]})
+
+    assert should_promote_model(candidate, reference) is True
+
+
+def test_model_promotion_rejects_higher_rmse() -> None:
+    """A candidate with a higher mean RMSE should be rejected."""
+    from scripts.training.train_model import should_promote_model
+
+    candidate = pd.DataFrame({"rmse": [3.0, 4.0, 5.0]})
+    reference = pd.DataFrame({"rmse": [2.0, 3.0, 4.0]})
+
+    assert should_promote_model(candidate, reference) is False
+
+
+def test_model_promotion_rejects_equal_rmse() -> None:
+    """A candidate with equal mean RMSE should not replace the reference."""
+    from scripts.training.train_model import should_promote_model
+
+    candidate = pd.DataFrame({"rmse": [1.0, 2.0, 3.0]})
+    reference = pd.DataFrame({"rmse": [1.0, 2.0, 3.0]})
+
+    assert should_promote_model(candidate, reference) is False

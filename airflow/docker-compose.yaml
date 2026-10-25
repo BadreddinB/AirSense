@@ -167,8 +167,6 @@ x-airflow-common:
 
     - ../models:/opt/airflow/models
 
-    - ../src:/opt/airflow/src
-
     - ../scripts:/opt/airflow/scripts
 
   user: "${AIRFLOW_UID:-50000}:0"
